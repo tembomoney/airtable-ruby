@@ -23,8 +23,10 @@ module Airtable
     # records(:sort => ["Name", :desc], :limit => 50, :offset => "as345g")
     def records(options={})
       options["sortField"], options["sortDirection"] = options.delete(:sort) if options[:sort]
-      results = self.class.get(worksheet_url, query: options).parsed_response
-      check_and_raise_error(results)
+      response = self.class.get(worksheet_url, query: options)
+      log_request(response, 'GET')
+      results = response.parsed_response
+      check_and_raise_error(results, status_code: response.code)
       RecordSet.new(results)
     end
 
@@ -42,8 +44,10 @@ module Airtable
         options['filterByFormula'] = options.delete(:formula)
       end
 
-      results = self.class.get(worksheet_url, query: options).parsed_response
-      check_and_raise_error(results)
+      response = self.class.get(worksheet_url, query: options)
+      log_request(response, 'GET')
+      results = response.parsed_response
+      check_and_raise_error(results, status_code: response.code)
       RecordSet.new(results)
     end
 
@@ -53,18 +57,22 @@ module Airtable
 
     # Returns record based given row id
     def find(id)
-      result = self.class.get(worksheet_url + "/" + id).parsed_response
-      check_and_raise_error(result)
+      response = self.class.get(worksheet_url + "/" + id)
+      log_request(response, 'GET')
+      result = response.parsed_response
+      check_and_raise_error(result, status_code: response.code)
       Record.new(result_attributes(result)) if result.present? && result["id"]
     end
 
     # Creates a record by posting to airtable
     def create(record)
-      result = self.class.post(worksheet_url,
+      response = self.class.post(worksheet_url,
         :body => { "fields" => record.fields }.to_json,
-        :headers => { "Content-type" => "application/json" }).parsed_response
+        :headers => { "Content-type" => "application/json" })
+      log_request(response, 'POST')
+      result = response.parsed_response
 
-      check_and_raise_error(result)
+      check_and_raise_error(result, status_code: response.code)
 
       record.override_attributes!(result_attributes(result))
       record
@@ -72,11 +80,13 @@ module Airtable
 
     # Replaces record in airtable based on id
     def update(record)
-      result = self.class.put(worksheet_url + "/" + record.id,
+      response = self.class.put(worksheet_url + "/" + record.id,
         :body => { "fields" => record.fields_for_update }.to_json,
-        :headers => { "Content-type" => "application/json" }).parsed_response
+        :headers => { "Content-type" => "application/json" })
+      log_request(response, 'PUT')
+      result = response.parsed_response
 
-      check_and_raise_error(result)
+      check_and_raise_error(result, status_code: response.code)
 
       record.override_attributes!(result_attributes(result))
       record
@@ -84,24 +94,47 @@ module Airtable
     end
 
     def update_record_fields(record_id, fields_for_update)
-      result = self.class.patch(worksheet_url + "/" + record_id,
+      response = self.class.patch(worksheet_url + "/" + record_id,
         :body => { "fields" => fields_for_update }.to_json,
-        :headers => { "Content-type" => "application/json" }).parsed_response
+        :headers => { "Content-type" => "application/json" })
+      log_request(response, 'PATCH')
+      result = response.parsed_response
 
-      check_and_raise_error(result)
+      check_and_raise_error(result, status_code: response.code)
 
       Record.new(result_attributes(result))
     end
 
     # Deletes record in table based on id
     def destroy(id)
-      self.class.delete(worksheet_url + "/" + id).parsed_response
+      response = self.class.delete(worksheet_url + "/" + id)
+      log_request(response, 'DELETE')
+      response.parsed_response
     end
 
     protected
 
-    def check_and_raise_error(response)
-      response['error'] ? raise(Error.new(response['error'])) : false
+    def check_and_raise_error(response, status_code: nil)
+      response['error'] ? raise(Error.new(response['error'], status_code: status_code)) : false
+    end
+
+    def log_request(response, http_method)
+      if defined?(Rails)
+        Rails.logger.info("[Airtable] #{response.code} #{http_method} #{worksheet_name}")
+      end
+
+      if defined?(NewRelic::Agent)
+        NewRelic::Agent.add_custom_attributes(
+          airtable_status_code: response.code,
+          airtable_table: worksheet_name,
+          airtable_method: http_method
+        )
+        NewRelic::Agent.record_custom_event('AirtableRequest', {
+          status_code: response.code,
+          table: worksheet_name,
+          http_method: http_method
+        })
+      end
     end
 
     def result_attributes(res)

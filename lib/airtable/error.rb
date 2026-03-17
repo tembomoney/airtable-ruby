@@ -2,12 +2,13 @@
 module Airtable
   class Error < StandardError
 
-    attr_reader :message, :type
+    attr_reader :message, :type, :status_code
     # {"error"=>{"type"=>"UNKNOWN_COLUMN_NAME", "message"=>"Could not find fields foo"}}
 
-    def initialize(error_hash)
+    def initialize(error_hash, status_code: nil)
       @message = error_hash['message']
       @type = error_hash['type']
+      @status_code = status_code
       super(@message)
     end
 
