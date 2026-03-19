@@ -8,13 +8,14 @@
 
 module Airtable
   class Client
-    def initialize(api_key)
+    def initialize(api_key, timeout: Resource::DEFAULT_TIMEOUT)
       @api_key = api_key
+      @timeout = timeout
     end
 
     # table("appXXV84QuCy2BPgLk", "Sheet Name")
     def table(app_token, worksheet_name)
-      Table.new(@api_key, app_token, worksheet_name)
+      Table.new(@api_key, app_token, worksheet_name, timeout: @timeout)
     end
-  end # Client
-end # Airtable
+  end
+end
