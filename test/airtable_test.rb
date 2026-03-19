@@ -7,7 +7,7 @@ describe Airtable do
     @sheet_name = "Test"
   end
 
-  describe "with Airtable" do
+  describe "client" do
     it "should allow client to be created" do
       @client = Airtable::Client.new(@client_key)
       assert_kind_of Airtable::Client, @client
@@ -15,6 +15,19 @@ describe Airtable do
       assert_kind_of Airtable::Table, @table
     end
 
+    it "should accept a custom timeout" do
+      @client = Airtable::Client.new(@client_key, timeout: 10)
+      @table = @client.table(@app_key, @sheet_name)
+      assert_kind_of Airtable::Table, @table
+    end
+
+    it "should use the default timeout when none is specified" do
+      @table = Airtable::Table.new(@client_key, @app_key, @sheet_name)
+      assert_kind_of Airtable::Table, @table
+    end
+  end
+
+  describe "records" do
     it "should fetch record set" do
       stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}", { "records" => [], "offset" => "abcde" })
       @table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
@@ -22,6 +35,21 @@ describe Airtable do
       assert_equal "abcde", @records.offset
     end
 
+    it "should fetch records with sort options" do
+      stub_request(:get, /https:\/\/api\.airtable\.com\/v0\/#{@app_key}\/#{@sheet_name}/)
+        .with(query: hash_including({ 'sortField' => 'Name', 'sortDirection' => 'desc' }))
+        .to_return(
+          body: { "records" => [{ "fields" => { "Name" => "Alice" }, "id" => "rec1" }] }.to_json,
+          status: 200,
+          headers: { 'Content-Type' => 'application/json' }
+        )
+      @table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      @records = @table.records(sort: ["Name", "desc"])
+      assert_equal 1, @records.records.length
+    end
+  end
+
+  describe "select" do
     it "should select records based on a formula" do
       query_str = "OR(RECORD_ID() = 'recXYZ1', RECORD_ID() = 'recXYZ2')"
       stub_request(:get, /https:\/\/api\.airtable\.com\/v0\/#{@app_key}\/#{@sheet_name}/)
@@ -42,7 +70,20 @@ describe Airtable do
         @table.select(formula: {foo: 'bar'})
       end
     end
+  end
 
+  describe "find" do
+    it "should find a record by id" do
+      record_id = "rec456"
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/#{record_id}",
+        { "fields" => { "name" => "Found Record" }, "id" => record_id })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      record = table.find(record_id)
+      assert_equal record_id, record["id"]
+    end
+  end
+
+  describe "create" do
     it "should allow creating records" do
       stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}",
         { "fields" => { "name" => "Sarah Jaine", "email" => "sarah@jaine.com", "foo" => "bar" }, "id" => "12345" }, :post)
@@ -52,27 +93,213 @@ describe Airtable do
       assert_equal "12345", record["id"]
       assert_equal "bar", record["foo"]
     end
+  end
 
-    it "should allow updating records" do
-        record_id = "12345"
-        stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/#{record_id}",
-          { "fields" => { "name" => "Sarah Jaine", "email" => "sarah@jaine.com", "foo" => "bar" }, "id" => record_id }, :put)
-        table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
-        record = Airtable::Record.new(:name => "Sarah Jaine", :email => "sarah@jaine.com", :id => record_id)
-        table.update(record)
-        assert_equal "12345", record["id"]
-        assert_equal "bar", record["foo"]
+  describe "update" do
+    it "should allow updating records with PUT" do
+      record_id = "12345"
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/#{record_id}",
+        { "fields" => { "name" => "Sarah Jaine", "email" => "sarah@jaine.com", "foo" => "bar" }, "id" => record_id }, :put)
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      record = Airtable::Record.new(:name => "Sarah Jaine", :email => "sarah@jaine.com", :id => record_id)
+      table.update(record)
+      assert_equal "12345", record["id"]
+      assert_equal "bar", record["foo"]
     end
 
+    it "should allow patching record fields" do
+      record_id = "rec123"
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/#{record_id}",
+        { "fields" => { "name" => "Updated Name" }, "id" => record_id }, :patch)
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      result = table.update_record_fields(record_id, { "name" => "Updated Name" })
+      assert_equal record_id, result["id"]
+    end
+  end
+
+  describe "destroy" do
+    it "should allow deleting a record" do
+      record_id = "rec789"
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/#{record_id}",
+        { "deleted" => true, "id" => record_id }, :delete)
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      result = table.destroy(record_id)
+      assert_equal true, result["deleted"]
+    end
+
+    it "should raise an error when delete returns an error" do
+      record_id = "rec789"
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/#{record_id}",
+        { "error" => { "type" => "NOT_FOUND", "message" => "Record not found" } }, :delete, 404)
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      assert_raises Airtable::Error do
+        table.destroy(record_id)
+      end
+    end
+  end
+
+  describe "error handling" do
     it "should raise an error when the API returns an error" do
       stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}",
         {"error"=>{"type"=>"UNKNOWN_COLUMN_NAME", "message"=>"Could not find fields foo"}}, :post, 422)
       table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
       record = Airtable::Record.new(:foo => "bar")
-      assert_raises Airtable::Error do
-         table.create(record)
+      error = assert_raises Airtable::Error do
+        table.create(record)
+      end
+      assert_equal "UNKNOWN_COLUMN_NAME", error.type
+      assert_equal 422, error.status_code
+    end
+
+    it "should include the status code in errors" do
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}",
+        {"error"=>{"type"=>"INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND", "message"=>"Invalid permissions"}}, :post, 403)
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      record = Airtable::Record.new(:foo => "bar")
+      error = assert_raises Airtable::Error do
+        table.create(record)
+      end
+      assert_equal 403, error.status_code
+      assert_equal "INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND", error.type
+    end
+
+    it "should raise an error for non-JSON response bodies" do
+      stub_request(:post, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}")
+        .to_return(
+          body: '<html>502 Bad Gateway</html>',
+          status: 502,
+          headers: { 'Content-Type' => 'text/html' }
+        )
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      record = Airtable::Record.new(:foo => "bar")
+      error = assert_raises Airtable::Error do
+        table.create(record)
+      end
+      assert_equal "INVALID_RESPONSE", error.type
+      assert_equal 502, error.status_code
+    end
+
+    it "should return nil for empty response bodies on find" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return(
+          body: '',
+          status: 200,
+          headers: { 'Content-Type' => 'application/json' }
+        )
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      result = table.find("rec123")
+      assert_nil result
+    end
+
+    it "should return nil for nil response bodies on find" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return(
+          body: nil,
+          status: 204,
+          headers: {}
+        )
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      result = table.find("rec123")
+      assert_nil result
+    end
+  end
+
+  describe "authorisation" do
+    it "should set authorisation header on requests" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .with(headers: { 'Authorization' => "Bearer #{@client_key}" })
+        .to_return(
+          body: { "fields" => { "name" => "Test" }, "id" => "rec123" }.to_json,
+          status: 200,
+          headers: { 'Content-Type' => 'application/json' }
+        )
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      record = table.find("rec123")
+      assert_equal "rec123", record["id"]
+    end
+  end
+
+  describe "timeouts" do
+    it "should raise Net::OpenTimeout on connection timeout" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_timeout
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      assert_raises Net::OpenTimeout do
+        table.find("rec123")
       end
     end
 
-  end # describe Airtable
-end # Airtable
+    it "should raise Net::ReadTimeout on read timeout" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_raise(Net::ReadTimeout)
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      assert_raises Net::ReadTimeout do
+        table.find("rec123")
+      end
+    end
+  end
+
+  describe "connection resilience" do
+    it "should recover from a stale connection" do
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123",
+        { "fields" => { "name" => "Test" }, "id" => "rec123" })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+
+      record = table.find("rec123")
+      assert_equal "rec123", record["id"]
+
+      record = table.find("rec123")
+      assert_equal "rec123", record["id"]
+    end
+
+    it "should retry once on connection reset" do
+      call_count = 0
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return do |_request|
+          call_count += 1
+          if call_count == 1
+            raise Errno::ECONNRESET
+          else
+            { body: { "fields" => { "name" => "Test" }, "id" => "rec123" }.to_json,
+              status: 200,
+              headers: { 'Content-Type' => 'application/json' } }
+          end
+        end
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      record = table.find("rec123")
+      assert_equal "rec123", record["id"]
+      assert_equal 2, call_count
+    end
+
+    it "should raise after retrying on persistent connection failure" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_raise(Errno::ECONNRESET)
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      assert_raises Errno::ECONNRESET do
+        table.find("rec123")
+      end
+    end
+  end
+
+  describe "worksheet names with special characters" do
+    it "should encode spaces in worksheet names" do
+      sheet_name = "My Table"
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/My%20Table/rec123",
+        { "fields" => { "name" => "Test" }, "id" => "rec123" })
+      table = Airtable::Client.new(@client_key).table(@app_key, sheet_name)
+      record = table.find("rec123")
+      assert_equal "rec123", record["id"]
+    end
+
+    it "should encode ampersands in worksheet names" do
+      sheet_name = "Plans & Users"
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/Plans%20%26%20Users/rec123",
+        { "fields" => { "name" => "Test" }, "id" => "rec123" })
+      table = Airtable::Client.new(@client_key).table(@app_key, sheet_name)
+      record = table.find("rec123")
+      assert_equal "rec123", record["id"]
+    end
+  end
+end
