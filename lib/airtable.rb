@@ -1,4 +1,7 @@
-require 'httparty'
+require 'net/http'
+require 'json'
+require 'uri'
+require 'openssl'
 require 'delegate'
 require 'active_support/core_ext/hash'
 

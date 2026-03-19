@@ -18,7 +18,6 @@ Gem::Specification.new do |spec|
   spec.require_paths = ['lib']
 
   spec.add_dependency 'activesupport', '>= 3.0'
-  spec.add_dependency 'httparty', '>= 0.24.0'
 
   spec.add_development_dependency 'bundler'
   spec.add_development_dependency 'minitest', '~> 5.25'
