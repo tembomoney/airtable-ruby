@@ -20,8 +20,9 @@ Gem::Specification.new do |spec|
   spec.add_dependency 'activesupport', '>= 3.0'
   spec.add_dependency 'httparty', '>= 0.24.0'
 
-  spec.add_development_dependency 'bundler', '~> 2.7.2'
-  spec.add_development_dependency 'minitest', '~> 5.6.0'
+  spec.add_development_dependency 'bundler'
+  spec.add_development_dependency 'minitest', '~> 5.25'
+  spec.add_development_dependency 'mutex_m'
   spec.add_development_dependency 'rake'
-  spec.add_development_dependency 'webmock', '~> 2.1.0'
+  spec.add_development_dependency 'webmock', '~> 3.24'
 end
