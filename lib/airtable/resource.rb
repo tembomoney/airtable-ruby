@@ -1,17 +1,140 @@
 module Airtable
-  # Base class for authorized resources sending network requests
+  # Base class for authorised resources sending network requests.
+  #
+  # Each Table instance holds its own persistent connection to the Airtable
+  # API. Table instances must not be shared across threads.
   class Resource
-    include HTTParty
-    base_uri 'https://api.airtable.com/v0/'
-    # debug_output $stdout
+    BASE_URI = 'https://api.airtable.com'
+    BASE_PATH = '/v0'
+    DEFAULT_TIMEOUT = 30
 
     attr_reader :api_key, :app_token, :worksheet_name
 
-    def initialize(api_key, app_token, worksheet_name)
+    def initialize(api_key, app_token, worksheet_name, timeout: DEFAULT_TIMEOUT)
       @api_key = api_key
       @app_token = app_token
       @worksheet_name = worksheet_name
-      self.class.headers({'Authorization' => "Bearer #{@api_key}"})
+      @timeout = timeout
     end
-  end # AuthorizedResource
-end # Airtable
+
+    private
+
+    def connection
+      if @connection.nil? || !connection_active?
+        @connection = build_connection
+      end
+      @connection
+    end
+
+    def build_connection
+      reused = !@connection.nil?
+      uri = URI(BASE_URI)
+      http = Net::HTTP.new(uri.host, uri.port)
+      http.use_ssl = true
+      http.open_timeout = @timeout
+      http.read_timeout = @timeout
+      http.write_timeout = @timeout
+      http.keep_alive_timeout = 30
+      http.start
+      log_connection(reused ? :reconnected : :opened)
+      http
+    end
+
+    def connection_active?
+      @connection&.started?
+    rescue IOError
+      false
+    end
+
+    def close_connection
+      @connection&.finish if connection_active?
+      log_connection(:closed)
+    rescue IOError
+      # already closed
+    ensure
+      @connection = nil
+    end
+
+    def perform_request(request)
+      retries = 0
+      begin
+        start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        response = connection.request(request)
+        duration_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time) * 1000).round
+        @last_request_duration_ms = duration_ms
+        @last_request_body_size = request.body&.bytesize || 0
+        @last_response_body_size = response.body&.bytesize || 0
+        response
+      rescue IOError, Errno::ECONNRESET, Errno::EPIPE, OpenSSL::SSL::SSLError => e
+        close_connection
+        retries += 1
+        if retries <= 1
+          log_retry(request, e)
+          retry
+        end
+        raise e
+      end
+    end
+
+    def log_retry(request, error)
+      message = "[Airtable] Connection reset (#{error.class}: #{error.message}), retrying #{request.method} #{worksheet_name}"
+      if defined?(Rails)
+        Rails.logger.warn(message)
+      else
+        $stderr.puts(message)
+      end
+    end
+
+    def log_connection(event)
+      message = "[Airtable] Connection #{event} for #{worksheet_name}"
+      if defined?(Rails)
+        Rails.logger.debug(message)
+      end
+    end
+
+    def default_headers
+      {
+        'Authorization' => "Bearer #{@api_key}",
+        'Content-Type' => 'application/json'
+      }
+    end
+
+    def build_get_request(path, query: nil)
+      full_path = query ? "#{path}?#{encode_query(query)}" : path
+      request = Net::HTTP::Get.new(full_path)
+      default_headers.each { |key, value| request[key] = value }
+      request
+    end
+
+    def build_post_request(path, body:)
+      request = Net::HTTP::Post.new(path)
+      default_headers.each { |key, value| request[key] = value }
+      request.body = body.to_json
+      request
+    end
+
+    def build_put_request(path, body:)
+      request = Net::HTTP::Put.new(path)
+      default_headers.each { |key, value| request[key] = value }
+      request.body = body.to_json
+      request
+    end
+
+    def build_patch_request(path, body:)
+      request = Net::HTTP::Patch.new(path)
+      default_headers.each { |key, value| request[key] = value }
+      request.body = body.to_json
+      request
+    end
+
+    def build_delete_request(path)
+      request = Net::HTTP::Delete.new(path)
+      default_headers.each { |key, value| request[key] = value }
+      request
+    end
+
+    def encode_query(params)
+      params.map { |key, value| "#{URI.encode_www_form_component(key.to_s)}=#{URI.encode_www_form_component(value.to_s)}" }.join('&')
+    end
+  end
+end
