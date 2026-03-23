@@ -283,6 +283,73 @@ describe Airtable do
     end
   end
 
+  describe "instrumentation" do
+    it "should track request duration in milliseconds" do
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123",
+        { "fields" => { "name" => "Test" }, "id" => "rec123" })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      table.find("rec123")
+      duration_ms = table.instance_variable_get(:@last_request_duration_ms)
+      assert_kind_of Integer, duration_ms
+      assert duration_ms >= 0, "duration_ms should be non-negative, got #{duration_ms}"
+    end
+
+    it "should track request body size for POST requests" do
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}",
+        { "fields" => { "name" => "Sarah" }, "id" => "rec1" }, :post)
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      record = Airtable::Record.new(:name => "Sarah")
+      table.create(record)
+      request_body_size = table.instance_variable_get(:@last_request_body_size)
+      assert request_body_size > 0, "request body size should be positive for POST, got #{request_body_size}"
+    end
+
+    it "should track response body size" do
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123",
+        { "fields" => { "name" => "Test" }, "id" => "rec123" })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      table.find("rec123")
+      response_body_size = table.instance_variable_get(:@last_response_body_size)
+      assert response_body_size > 0, "response body size should be positive, got #{response_body_size}"
+    end
+
+    it "should track zero request body size for GET requests" do
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123",
+        { "fields" => { "name" => "Test" }, "id" => "rec123" })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      table.find("rec123")
+      request_body_size = table.instance_variable_get(:@last_request_body_size)
+      assert_equal 0, request_body_size
+    end
+
+    it "should log connection retry with error details" do
+      call_count = 0
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return do |_request|
+          call_count += 1
+          if call_count == 1
+            raise Errno::ECONNRESET
+          else
+            { body: { "fields" => { "name" => "Test" }, "id" => "rec123" }.to_json,
+              status: 200,
+              headers: { 'Content-Type' => 'application/json' } }
+          end
+        end
+
+      stderr_output = StringIO.new
+      original_stderr = $stderr
+      $stderr = stderr_output
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      table.find("rec123")
+
+      $stderr = original_stderr
+      assert_includes stderr_output.string, '[Airtable] Connection reset'
+      assert_includes stderr_output.string, 'Errno::ECONNRESET'
+      assert_includes stderr_output.string, 'retrying GET'
+    end
+  end
+
   describe "worksheet names with special characters" do
     it "should encode spaces in worksheet names" do
       sheet_name = "My Table"

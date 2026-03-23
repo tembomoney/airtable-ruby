@@ -27,6 +27,7 @@ module Airtable
     end
 
     def build_connection
+      reused = !@connection.nil?
       uri = URI(BASE_URI)
       http = Net::HTTP.new(uri.host, uri.port)
       http.use_ssl = true
@@ -35,6 +36,7 @@ module Airtable
       http.write_timeout = @timeout
       http.keep_alive_timeout = 30
       http.start
+      log_connection(reused ? :reconnected : :opened)
       http
     end
 
@@ -46,6 +48,7 @@ module Airtable
 
     def close_connection
       @connection&.finish if connection_active?
+      log_connection(:closed)
     rescue IOError
       # already closed
     ensure
@@ -55,12 +58,37 @@ module Airtable
     def perform_request(request)
       retries = 0
       begin
-        connection.request(request)
+        start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        response = connection.request(request)
+        duration_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time) * 1000).round
+        @last_request_duration_ms = duration_ms
+        @last_request_body_size = request.body&.bytesize || 0
+        @last_response_body_size = response.body&.bytesize || 0
+        response
       rescue IOError, Errno::ECONNRESET, Errno::EPIPE, OpenSSL::SSL::SSLError => e
         close_connection
         retries += 1
-        retry if retries <= 1
+        if retries <= 1
+          log_retry(request, e)
+          retry
+        end
         raise e
+      end
+    end
+
+    def log_retry(request, error)
+      message = "[Airtable] Connection reset (#{error.class}: #{error.message}), retrying #{request.method} #{worksheet_name}"
+      if defined?(Rails)
+        Rails.logger.warn(message)
+      else
+        $stderr.puts(message)
+      end
+    end
+
+    def log_connection(event)
+      message = "[Airtable] Connection #{event} for #{worksheet_name}"
+      if defined?(Rails)
+        Rails.logger.debug(message)
       end
     end
 

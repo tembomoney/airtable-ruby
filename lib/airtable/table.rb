@@ -123,21 +123,30 @@ module Airtable
 
     def log_response(response, http_method)
       status_code = response.code.to_i
+      duration_ms = @last_request_duration_ms || 0
+      request_body_size = @last_request_body_size || 0
+      response_body_size = @last_response_body_size || 0
 
       if defined?(Rails)
-        Rails.logger.info("[Airtable] #{status_code} #{http_method} #{worksheet_name}")
+        Rails.logger.info("[Airtable] #{status_code} #{http_method} #{worksheet_name} #{duration_ms}ms request=#{request_body_size}b response=#{response_body_size}b")
       end
 
       if defined?(NewRelic::Agent)
         NewRelic::Agent.add_custom_attributes(
           airtable_status_code: status_code,
           airtable_table: worksheet_name,
-          airtable_method: http_method
+          airtable_method: http_method,
+          airtable_duration_ms: duration_ms,
+          airtable_request_body_size: request_body_size,
+          airtable_response_body_size: response_body_size
         )
         NewRelic::Agent.record_custom_event('AirtableRequest', {
           status_code: status_code,
           table: worksheet_name,
-          http_method: http_method
+          http_method: http_method,
+          duration_ms: duration_ms,
+          request_body_size: request_body_size,
+          response_body_size: response_body_size
         })
       end
     end
