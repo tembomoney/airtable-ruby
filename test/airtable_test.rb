@@ -350,6 +350,117 @@ describe Airtable do
     end
   end
 
+  describe "error logging in responses" do
+    it "should include error_type and error_message in log output when Airtable returns an error" do
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}",
+        { "error" => { "type" => "INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND", "message" => "Invalid permissions, or the requested model was not found" } }, :post, 403)
+
+      stderr_output = StringIO.new
+      original_stderr = $stderr
+      $stderr = stderr_output
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      record = Airtable::Record.new(:name => "Test")
+
+      assert_raises Airtable::Error do
+        table.create(record)
+      end
+
+      $stderr = original_stderr
+      assert_includes stderr_output.string, 'error_type=INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND'
+      assert_includes stderr_output.string, 'error_message=Invalid permissions, or the requested model was not found'
+    end
+
+    it "should not include error fields in log output for successful responses" do
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123",
+        { "fields" => { "name" => "Test" }, "id" => "rec123" })
+
+      stderr_output = StringIO.new
+      original_stderr = $stderr
+      $stderr = stderr_output
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      table.find("rec123")
+
+      $stderr = original_stderr
+      refute_includes stderr_output.string, 'error_type='
+      refute_includes stderr_output.string, 'error_message='
+    end
+
+    it "should include error details for GET requests returning 403" do
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123",
+        { "error" => { "type" => "MODEL_ID_NOT_FOUND", "message" => "Could not find record" } }, :get, 403)
+
+      stderr_output = StringIO.new
+      original_stderr = $stderr
+      $stderr = stderr_output
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+
+      assert_raises Airtable::Error do
+        table.find("rec123")
+      end
+
+      $stderr = original_stderr
+      assert_includes stderr_output.string, 'error_type=MODEL_ID_NOT_FOUND'
+    end
+
+    it "should include error details for PATCH requests with unknown columns" do
+      record_id = "rec123"
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/#{record_id}",
+        { "error" => { "type" => "UNKNOWN_COLUMN_NAME", "message" => "Could not find fields Premium Type (protection)" } }, :patch, 422)
+
+      stderr_output = StringIO.new
+      original_stderr = $stderr
+      $stderr = stderr_output
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+
+      assert_raises Airtable::Error do
+        table.update_record_fields(record_id, { "Premium Type (protection)" => "Life" })
+      end
+
+      $stderr = original_stderr
+      assert_includes stderr_output.string, 'error_type=UNKNOWN_COLUMN_NAME'
+      assert_includes stderr_output.string, 'error_message=Could not find fields Premium Type (protection)'
+    end
+
+    it "should include error details for DELETE requests on missing records" do
+      record_id = "rec789"
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/#{record_id}",
+        { "error" => { "type" => "NOT_FOUND", "message" => "Record not found" } }, :delete, 404)
+
+      stderr_output = StringIO.new
+      original_stderr = $stderr
+      $stderr = stderr_output
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+
+      assert_raises Airtable::Error do
+        table.destroy(record_id)
+      end
+
+      $stderr = original_stderr
+      assert_includes stderr_output.string, 'error_type=NOT_FOUND'
+    end
+
+    it "should preserve the error type and message on the raised exception" do
+      stub_airtable_response!("https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}",
+        { "error" => { "type" => "INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND", "message" => "Invalid permissions, or the requested model was not found" } }, :post, 403)
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      record = Airtable::Record.new(:name => "Test")
+
+      error = assert_raises Airtable::Error do
+        table.create(record)
+      end
+
+      assert_equal "INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND", error.type
+      assert_equal "Invalid permissions, or the requested model was not found", error.message
+      assert_equal 403, error.status_code
+    end
+  end
+
   describe "worksheet names with special characters" do
     it "should encode spaces in worksheet names" do
       sheet_name = "My Table"
