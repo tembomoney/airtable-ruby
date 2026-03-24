@@ -24,8 +24,8 @@ module Airtable
       options["sortField"], options["sortDirection"] = options.delete(:sort) if options[:sort]
       request = build_get_request(worksheet_url, query: options)
       response = perform_request(request)
-      log_response(response, 'GET')
       result = parse_response(response)
+      log_response(response, 'GET', parsed_result: result)
       check_and_raise_error(result, status_code: response.code.to_i)
       RecordSet.new(result)
     end
@@ -46,8 +46,8 @@ module Airtable
 
       request = build_get_request(worksheet_url, query: options)
       response = perform_request(request)
-      log_response(response, 'GET')
       result = parse_response(response)
+      log_response(response, 'GET', parsed_result: result)
       check_and_raise_error(result, status_code: response.code.to_i)
       RecordSet.new(result)
     end
@@ -60,8 +60,8 @@ module Airtable
     def find(id)
       request = build_get_request("#{worksheet_url}/#{id}")
       response = perform_request(request)
-      log_response(response, 'GET')
       result = parse_response(response)
+      log_response(response, 'GET', parsed_result: result)
       check_and_raise_error(result, status_code: response.code.to_i)
       Record.new(result_attributes(result)) if result.present? && result["id"]
     end
@@ -70,8 +70,8 @@ module Airtable
     def create(record)
       request = build_post_request(worksheet_url, body: { "fields" => record.fields })
       response = perform_request(request)
-      log_response(response, 'POST')
       result = parse_response(response)
+      log_response(response, 'POST', parsed_result: result)
 
       check_and_raise_error(result, status_code: response.code.to_i)
 
@@ -83,8 +83,8 @@ module Airtable
     def update(record)
       request = build_put_request("#{worksheet_url}/#{record.id}", body: { "fields" => record.fields_for_update })
       response = perform_request(request)
-      log_response(response, 'PUT')
       result = parse_response(response)
+      log_response(response, 'PUT', parsed_result: result)
 
       check_and_raise_error(result, status_code: response.code.to_i)
 
@@ -95,8 +95,8 @@ module Airtable
     def update_record_fields(record_id, fields_for_update)
       request = build_patch_request("#{worksheet_url}/#{record_id}", body: { "fields" => fields_for_update })
       response = perform_request(request)
-      log_response(response, 'PATCH')
       result = parse_response(response)
+      log_response(response, 'PATCH', parsed_result: result)
 
       check_and_raise_error(result, status_code: response.code.to_i)
 
@@ -107,8 +107,8 @@ module Airtable
     def destroy(id)
       request = build_delete_request("#{worksheet_url}/#{id}")
       response = perform_request(request)
-      log_response(response, 'DELETE')
       result = parse_response(response)
+      log_response(response, 'DELETE', parsed_result: result)
       check_and_raise_error(result, status_code: response.code.to_i)
       result
     end
@@ -121,32 +121,45 @@ module Airtable
       raise Error.new(response['error'], status_code: status_code)
     end
 
-    def log_response(response, http_method)
+    def log_response(response, http_method, parsed_result: nil)
       status_code = response.code.to_i
       duration_ms = @last_request_duration_ms || 0
       request_body_size = @last_request_body_size || 0
       response_body_size = @last_response_body_size || 0
+      error_type = parsed_result&.dig('error', 'type')
+      error_message = parsed_result&.dig('error', 'message')
+
+      log_line = "[Airtable] #{status_code} #{http_method} #{worksheet_name} #{duration_ms}ms request=#{request_body_size}b response=#{response_body_size}b"
+      log_line += " error_type=#{error_type} error_message=#{error_message}" if error_type
 
       if defined?(Rails)
-        Rails.logger.info("[Airtable] #{status_code} #{http_method} #{worksheet_name} #{duration_ms}ms request=#{request_body_size}b response=#{response_body_size}b")
+        Rails.logger.info(log_line)
+      else
+        $stderr.puts(log_line)
       end
 
       if defined?(NewRelic::Agent)
-        NewRelic::Agent.add_custom_attributes(
+        attributes = {
           airtable_status_code: status_code,
           airtable_table: worksheet_name,
           airtable_method: http_method,
           airtable_duration_ms: duration_ms,
           airtable_request_body_size: request_body_size,
           airtable_response_body_size: response_body_size
-        )
+        }
+        attributes[:airtable_error_type] = error_type if error_type
+        attributes[:airtable_error_message] = error_message if error_message
+
+        NewRelic::Agent.add_custom_attributes(attributes)
         NewRelic::Agent.record_custom_event('AirtableRequest', {
           status_code: status_code,
           table: worksheet_name,
           http_method: http_method,
           duration_ms: duration_ms,
           request_body_size: request_body_size,
-          response_body_size: response_body_size
+          response_body_size: response_body_size,
+          error_type: error_type,
+          error_message: error_message
         })
       end
     end
