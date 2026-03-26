@@ -645,4 +645,178 @@ describe Airtable do
       assert_equal 999, error.status_code
     end
   end
+
+  describe "auto-retry on 429/503" do
+    before do
+      # Use a permissive rate limiter so it doesn't interfere with retry tests
+      Airtable::RateLimiter.instance = Airtable::RateLimiter.new(max_requests: 1000, window_seconds: 1.0)
+    end
+
+    after do
+      Airtable::RateLimiter.reset!
+    end
+
+    it "should retry on 429 and succeed on second attempt" do
+      call_count = 0
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return do |_request|
+          call_count += 1
+          if call_count == 1
+            { body: '{"error":{"message":"Rate limited"}}', status: 429, headers: { 'Content-Type' => 'application/json' } }
+          else
+            { body: { "fields" => { "name" => "Test" }, "id" => "rec123" }.to_json, status: 200, headers: { 'Content-Type' => 'application/json' } }
+          end
+        end
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      slept = []
+      table.define_singleton_method(:sleep_for_retry) { |t| slept << t }
+
+      record = table.find("rec123")
+
+      assert_equal "rec123", record["id"]
+      assert_equal 2, call_count
+      assert_equal 1, slept.length
+    end
+
+    it "should retry on 503 and succeed on second attempt" do
+      call_count = 0
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return do |_request|
+          call_count += 1
+          if call_count == 1
+            { body: '<html>503 Service Unavailable</html>', status: 503, headers: { 'Content-Type' => 'text/html' } }
+          else
+            { body: { "fields" => { "name" => "Test" }, "id" => "rec123" }.to_json, status: 200, headers: { 'Content-Type' => 'application/json' } }
+          end
+        end
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      table.define_singleton_method(:sleep_for_retry) { |_t| }
+
+      record = table.find("rec123")
+
+      assert_equal "rec123", record["id"]
+      assert_equal 2, call_count
+    end
+
+    it "should NOT retry on 403" do
+      call_count = 0
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return do |_request|
+          call_count += 1
+          { body: '{"error":{"type":"INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND","message":"Invalid permissions"}}', status: 403, headers: { 'Content-Type' => 'application/json' } }
+        end
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      assert_raises(Airtable::Error) { table.find("rec123") }
+      assert_equal 1, call_count, "403 should not trigger retry"
+    end
+
+    it "should NOT retry on 422" do
+      call_count = 0
+      stub_request(:post, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}")
+        .to_return do |_request|
+          call_count += 1
+          { body: '{"error":{"type":"INVALID_REQUEST","message":"Bad data"}}', status: 422, headers: { 'Content-Type' => 'application/json' } }
+        end
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      record = Airtable::Record.new(foo: "bar")
+      assert_raises(Airtable::Error) { table.create(record) }
+      assert_equal 1, call_count, "422 should not trigger retry"
+    end
+
+    it "should give up after max retries" do
+      call_count = 0
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return do |_request|
+          call_count += 1
+          { body: '{"error":{"message":"Rate limited"}}', status: 429, headers: { 'Content-Type' => 'application/json' } }
+        end
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      slept = []
+      table.define_singleton_method(:sleep_for_retry) { |t| slept << t }
+
+      error = assert_raises(Airtable::Error) { table.find("rec123") }
+
+      assert_equal 'TOO_MANY_REQUESTS', error.type
+      assert_equal 429, error.status_code
+      assert_equal 3, call_count, "Should make exactly #{Airtable::Resource::MAX_API_RETRIES} attempts"
+      assert_equal 2, slept.length, "Should sleep between retries (not after final attempt)"
+    end
+
+    it "should log retry attempts" do
+      call_count = 0
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return do |_request|
+          call_count += 1
+          if call_count == 1
+            { body: '{"error":{"message":"Rate limited"}}', status: 429, headers: { 'Content-Type' => 'application/json' } }
+          else
+            { body: { "fields" => { "name" => "Test" }, "id" => "rec123" }.to_json, status: 200, headers: { 'Content-Type' => 'application/json' } }
+          end
+        end
+
+      stderr_output = StringIO.new
+      original_stderr = $stderr
+      $stderr = stderr_output
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      table.define_singleton_method(:sleep_for_retry) { |_t| }
+      table.find("rec123")
+
+      $stderr = original_stderr
+
+      assert_includes stderr_output.string, 'HTTP 429'
+      assert_includes stderr_output.string, 'retry 1/2'
+    end
+
+    it "should use exponential backoff with jitter" do
+      call_count = 0
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return do |_request|
+          call_count += 1
+          { body: '{"error":{"message":"Rate limited"}}', status: 429, headers: { 'Content-Type' => 'application/json' } }
+        end
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      slept = []
+      table.define_singleton_method(:sleep_for_retry) { |t| slept << t }
+
+      assert_raises(Airtable::Error) { table.find("rec123") }
+
+      # First retry: backoff base=1, jitter=[0,1) → total [1,2)
+      assert slept[0] >= 1.0 && slept[0] < 2.0, "First backoff should be [1,2), got #{slept[0]}"
+      # Second retry: backoff base=2, jitter=[0,2) → total [2,4)
+      assert slept[1] >= 2.0 && slept[1] < 4.0, "Second backoff should be [2,4), got #{slept[1]}"
+    end
+
+    it "should call rate limiter before each retry" do
+      wait_count = 0
+      original_wait = Airtable::RateLimiter.instance.method(:wait!)
+      Airtable::RateLimiter.instance.define_singleton_method(:wait!) do |base_id|
+        wait_count += 1
+        original_wait.call(base_id)
+      end
+
+      call_count = 0
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return do |_request|
+          call_count += 1
+          if call_count == 1
+            { body: '{"error":{"message":"Rate limited"}}', status: 429, headers: { 'Content-Type' => 'application/json' } }
+          else
+            { body: { "fields" => { "name" => "Test" }, "id" => "rec123" }.to_json, status: 200, headers: { 'Content-Type' => 'application/json' } }
+          end
+        end
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      table.define_singleton_method(:sleep_for_retry) { |_t| }
+      table.find("rec123")
+
+      assert_equal 2, wait_count, "Rate limiter should be called before each attempt (initial + retry)"
+    end
+  end
 end
