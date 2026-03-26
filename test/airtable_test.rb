@@ -611,6 +611,24 @@ describe Airtable do
       error = assert_raises(Airtable::Error) { table.find("rec123") }
       assert error.message.length <= 250, "Error message should be truncated, got #{error.message.length} chars"
     end
+
+    it "should handle string error value instead of hash" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return(body: '{"error":"Something went wrong"}', status: 422, headers: { 'Content-Type' => 'application/json' })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      error = assert_raises(Airtable::Error) { table.find("rec123") }
+      assert_equal 'INVALID_REQUEST', error.type
+      assert_equal 422, error.status_code
+    end
+
+    it "should handle array error value instead of hash" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return(body: '{"error":["bad","request"]}', status: 400, headers: { 'Content-Type' => 'application/json' })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      error = assert_raises(Airtable::Error) { table.find("rec123") }
+      assert_equal 'UNKNOWN_ERROR', error.type
+      assert_equal 400, error.status_code
+    end
   end
 
   describe "Error.from_response" do
@@ -698,6 +716,30 @@ describe Airtable do
 
       assert_equal "rec123", record["id"]
       assert_equal 2, call_count
+    end
+
+    it "should retry POST requests with body intact" do
+      call_count = 0
+      bodies = []
+      stub_request(:post, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}")
+        .to_return do |request|
+          call_count += 1
+          bodies << request.body
+          if call_count == 1
+            { body: '{"error":{"message":"Rate limited"}}', status: 429, headers: { 'Content-Type' => 'application/json' } }
+          else
+            { body: { "fields" => { "name" => "Sarah" }, "id" => "rec1" }.to_json, status: 200, headers: { 'Content-Type' => 'application/json' } }
+          end
+        end
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      table.define_singleton_method(:sleep_for_retry) { |_t| }
+      record = Airtable::Record.new(name: "Sarah")
+      table.create(record)
+
+      assert_equal 2, call_count
+      assert_equal bodies[0], bodies[1], "Request body should be identical on retry"
+      assert_equal "rec1", record["id"]
     end
 
     it "should NOT retry on 403" do

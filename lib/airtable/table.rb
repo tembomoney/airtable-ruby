@@ -115,18 +115,18 @@ module Airtable
 
     protected
 
-    def check_and_raise_error(response, status_code: nil)
-      if response.is_a?(Hash) && response['error']
-        error_hash = response['error']
+    def check_and_raise_error(result, status_code: nil)
+      if result.is_a?(Hash) && result['error'].is_a?(Hash)
+        error_hash = result['error']
         # Preserve Airtable's specific type if present, otherwise classify by status code
         error_hash['type'] ||= Error::STATUS_CODE_ERROR_TYPES.fetch(status_code, 'UNKNOWN_ERROR')
         raise Error.new(error_hash, status_code: status_code)
       end
 
-      # Raise on non-2xx status codes even when the parsed result has no error hash.
-      # Covers edge cases where JSON parses successfully but the status indicates failure.
+      # Raise on non-2xx status codes even when the parsed result has no error hash
+      # (or has a non-Hash error value like a string).
       if status_code && status_code >= 400
-        raise Error.from_response(status_code, response.to_json)
+        raise Error.from_response(status_code, nil)
       end
     end
 
@@ -135,8 +135,9 @@ module Airtable
       duration_ms = @last_request_duration_ms || 0
       request_body_size = @last_request_body_size || 0
       response_body_size = @last_response_body_size || 0
-      error_type = parsed_result&.dig('error', 'type')
-      error_message = parsed_result&.dig('error', 'message')
+      error_hash = parsed_result.is_a?(Hash) && parsed_result['error'].is_a?(Hash) ? parsed_result['error'] : nil
+      error_type = error_hash&.dig('type')
+      error_message = error_hash&.dig('message')
 
       log_line = "[Airtable] #{status_code} #{http_method} #{worksheet_name} #{duration_ms}ms request=#{request_body_size}b response=#{response_body_size}b"
       log_line += " error_type=#{error_type} error_message=#{error_message}" if error_type

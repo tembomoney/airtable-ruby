@@ -51,6 +51,10 @@ module Airtable
 
     private
 
+    # Note: buckets are created per base_id and never evicted. For typical
+    # usage (a handful of bases), this is fine. If the process touches
+    # thousands of distinct bases over its lifetime, consider adding LRU
+    # eviction or periodic cleanup.
     def bucket_for(base_id)
       @buckets_mutex.synchronize do
         @buckets[base_id] ||= Bucket.new(@max_requests, @window_seconds, @clock)
