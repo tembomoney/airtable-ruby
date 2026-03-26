@@ -225,7 +225,7 @@ describe "batch operations" do
     it "should send performUpsert in request body" do
       records = [Airtable::Record.new(name: "Alice", email: "alice@example.com")]
       request_body = nil
-      stub_request(:post, @base_url)
+      stub_request(:patch, @base_url)
         .to_return do |request|
           request_body = JSON.parse(request.body)
           { body: { "records" => [{ "id" => "rec1", "fields" => { "name" => "Alice" } }], "createdRecords" => ["rec1"] }.to_json,
@@ -246,7 +246,7 @@ describe "batch operations" do
         Airtable::Record.new(name: "Alice", email: "alice@example.com"),
         Airtable::Record.new(name: "Bob", email: "bob@example.com")
       ]
-      stub_request(:post, @base_url)
+      stub_request(:patch, @base_url)
         .to_return(
           body: {
             "records" => [
@@ -269,7 +269,7 @@ describe "batch operations" do
     it "should auto-chunk upserts into groups of 10" do
       records = 15.times.map { |i| Airtable::Record.new(name: "R#{i}", email: "r#{i}@test.com") }
       call_count = 0
-      stub_request(:post, @base_url)
+      stub_request(:patch, @base_url)
         .to_return do |request|
           call_count += 1
           body = JSON.parse(request.body)
@@ -289,7 +289,7 @@ describe "batch operations" do
     it "should handle upsert partial failure" do
       records = 15.times.map { |i| Airtable::Record.new(name: "R#{i}") }
       call_count = 0
-      stub_request(:post, @base_url)
+      stub_request(:patch, @base_url)
         .to_return do |_request|
           call_count += 1
           if call_count == 1
@@ -312,7 +312,7 @@ describe "batch operations" do
     it "should support multiple merge fields" do
       records = [Airtable::Record.new(name: "Alice", email: "alice@test.com")]
       request_body = nil
-      stub_request(:post, @base_url)
+      stub_request(:patch, @base_url)
         .to_return do |request|
           request_body = JSON.parse(request.body)
           { body: { "records" => [{ "id" => "rec1", "fields" => {} }], "createdRecords" => [] }.to_json,

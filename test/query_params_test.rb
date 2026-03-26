@@ -56,7 +56,7 @@ describe "query parameters and formula escaping" do
       table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
       table.select(view: 'Main View')
 
-      assert_includes requested_url, "view=Main"
+      assert_includes requested_url, "view=Main%20View"
     end
 
     it "should include view in records query" do
@@ -70,7 +70,7 @@ describe "query parameters and formula escaping" do
       table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
       table.records(view: 'Grid view')
 
-      assert_includes requested_url, "view=Grid"
+      assert_includes requested_url, "view=Grid%20view"
     end
   end
 
@@ -88,7 +88,7 @@ describe "query parameters and formula escaping" do
 
       assert_includes requested_url, "fields%5B%5D=Name"
       assert_includes requested_url, "fields%5B%5D=Email"
-      assert_includes requested_url, "view=Main"
+      assert_includes requested_url, "view=Main%20View"
       assert_includes requested_url, "filterByFormula="
     end
   end

@@ -141,6 +141,9 @@ module Airtable
     # Auto-chunks into groups of 10. Returns a BatchResult.
     def destroy_batch(record_ids)
       batch_result = BatchResult.new
+      record_ids = Array(record_ids)
+      return batch_result if record_ids.empty?
+
       record_ids.each_slice(BATCH_MAX) do |chunk|
         query_string = chunk.map { |id| "records[]=#{URI.encode_www_form_component(id)}" }.join("&")
         request = build_delete_request("#{worksheet_url}?#{query_string}")
@@ -170,15 +173,18 @@ module Airtable
     # created_record_ids indicating which records were newly created.
     def upsert(records, fields_to_merge_on:)
       batch_result = BatchResult.new
+      records = Array(records)
+      return batch_result if records.empty?
+
       records.each_slice(BATCH_MAX) do |chunk|
         body = {
           "performUpsert" => { "fieldsToMergeOn" => fields_to_merge_on },
           "records" => chunk.map { |r| { "fields" => r.fields } }
         }
-        request = build_post_request(worksheet_url, body: body)
+        request = build_patch_request(worksheet_url, body: body)
         response = perform_request(request)
         result = parse_response(response)
-        log_response(response, 'POST', parsed_result: result)
+        log_response(response, 'PATCH', parsed_result: result)
 
         if result.is_a?(Hash) && result['error'].is_a?(Hash)
           error = Error.new(result['error'], status_code: response.code.to_i)
@@ -278,22 +284,29 @@ module Airtable
     # processes the response into the BatchResult.
     def batch_operation(records)
       batch_result = BatchResult.new
-      return batch_result if records.nil? || records.empty?
+      records = Array(records)
+      return batch_result if records.empty?
 
       records.each_slice(BATCH_MAX) do |chunk|
-        request = yield(chunk)
-        response = perform_request(request)
-        result = parse_response(response)
-        http_method = request.method
-        log_response(response, http_method, parsed_result: result)
+        begin
+          request = yield(chunk)
+          response = perform_request(request)
+          result = parse_response(response)
+          http_method = request.method
+          log_response(response, http_method, parsed_result: result)
 
-        if result.is_a?(Hash) && result['error'].is_a?(Hash)
-          error = Error.new(result['error'], status_code: response.code.to_i)
-          chunk.each { |r| batch_result.add_failure(r, error) }
-        elsif result['records']
-          result['records'].each do |r|
-            batch_result.add_success(Record.new(result_attributes(r)))
+          if result.is_a?(Hash) && result['error'].is_a?(Hash)
+            error = Error.new(result['error'], status_code: response.code.to_i)
+            chunk.each { |r| batch_result.add_failure(r, error) }
+          elsif result.is_a?(Hash) && result['records']
+            result['records'].each do |r|
+              batch_result.add_success(Record.new(result_attributes(r)))
+            end
+          else
+            chunk.each { |r| batch_result.add_failure(r, Error.new({ 'type' => 'UNEXPECTED_RESPONSE', 'message' => 'Response contained no records or error' })) }
           end
+        rescue Airtable::Error => e
+          chunk.each { |r| batch_result.add_failure(r, e) }
         end
       end
       batch_result
