@@ -113,7 +113,84 @@ module Airtable
       result
     end
 
+    # Batch create records. Accepts an array of Record objects, auto-chunks
+    # into groups of 10 (Airtable API limit). Returns a BatchResult with
+    # successes and failures for partial failure handling.
+    def create_batch(records)
+      batch_operation(records) do |chunk|
+        body = { "records" => chunk.map { |r| { "fields" => r.fields } } }
+        build_post_request(worksheet_url, body: body)
+      end
+    end
+
+    # Batch update records via PATCH (partial update). Each record must have
+    # an id. Auto-chunks into groups of 10. Returns a BatchResult.
+    def update_batch(records)
+      batch_operation(records) do |chunk|
+        body = { "records" => chunk.map { |r| { "id" => r.id, "fields" => r.fields_for_update } } }
+        build_patch_request(worksheet_url, body: body)
+      end
+    end
+
+    # Batch delete records by ID. Accepts an array of record ID strings.
+    # Auto-chunks into groups of 10. Returns a BatchResult.
+    def destroy_batch(record_ids)
+      batch_result = BatchResult.new
+      record_ids.each_slice(BATCH_MAX) do |chunk|
+        query_string = chunk.map { |id| "records[]=#{URI.encode_www_form_component(id)}" }.join("&")
+        request = build_delete_request("#{worksheet_url}?#{query_string}")
+        response = perform_request(request)
+        result = parse_response(response)
+        log_response(response, 'DELETE', parsed_result: result)
+
+        if result.is_a?(Hash) && result['error'].is_a?(Hash)
+          error = Error.new(result['error'], status_code: response.code.to_i)
+          chunk.each { |id| batch_result.add_failure(id, error) }
+        elsif result['records']
+          result['records'].each do |r|
+            if r['deleted']
+              batch_result.add_success(r)
+            else
+              batch_result.add_failure(r['id'], Error.new({ 'type' => 'DELETE_FAILED', 'message' => "Record #{r['id']} was not deleted" }))
+            end
+          end
+        end
+      end
+      batch_result
+    end
+
+    # Upsert records. Find-or-create in a single call using Airtable's
+    # performUpsert parameter. Accepts an array of Record objects and an
+    # array of field names to merge on. Returns a BatchResult with
+    # created_record_ids indicating which records were newly created.
+    def upsert(records, fields_to_merge_on:)
+      batch_result = BatchResult.new
+      records.each_slice(BATCH_MAX) do |chunk|
+        body = {
+          "performUpsert" => { "fieldsToMergeOn" => fields_to_merge_on },
+          "records" => chunk.map { |r| { "fields" => r.fields } }
+        }
+        request = build_post_request(worksheet_url, body: body)
+        response = perform_request(request)
+        result = parse_response(response)
+        log_response(response, 'POST', parsed_result: result)
+
+        if result.is_a?(Hash) && result['error'].is_a?(Hash)
+          error = Error.new(result['error'], status_code: response.code.to_i)
+          chunk.each { |r| batch_result.add_failure(r, error) }
+        else
+          batch_result.add_created_ids(result['createdRecords'] || [])
+          (result['records'] || []).each do |r|
+            batch_result.add_success(Record.new(result_attributes(r)))
+          end
+        end
+      end
+      batch_result
+    end
+
     protected
+
+    BATCH_MAX = 10
 
     def check_and_raise_error(result, status_code: nil)
       if result.is_a?(Hash) && result['error'].is_a?(Hash)
@@ -189,6 +266,32 @@ module Airtable
 
     def worksheet_url
       "#{BASE_PATH}/#{app_token}/#{url_encode(worksheet_name)}"
+    end
+
+    # Shared batch operation logic for create_batch and update_batch.
+    # Yields each chunk to the block which builds the request, then
+    # processes the response into the BatchResult.
+    def batch_operation(records)
+      batch_result = BatchResult.new
+      return batch_result if records.nil? || records.empty?
+
+      records.each_slice(BATCH_MAX) do |chunk|
+        request = yield(chunk)
+        response = perform_request(request)
+        result = parse_response(response)
+        http_method = request.method
+        log_response(response, http_method, parsed_result: result)
+
+        if result.is_a?(Hash) && result['error'].is_a?(Hash)
+          error = Error.new(result['error'], status_code: response.code.to_i)
+          chunk.each { |r| batch_result.add_failure(r, error) }
+        elsif result['records']
+          result['records'].each do |r|
+            batch_result.add_success(Record.new(result_attributes(r)))
+          end
+        end
+      end
+      batch_result
     end
 
     # From http://apidock.com/ruby/ERB/Util/url_encode
