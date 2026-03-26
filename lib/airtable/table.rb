@@ -22,6 +22,8 @@ module Airtable
     # records(:sort => ["Name", :desc], :limit => 50, :offset => "as345g")
     def records(options={})
       options["sortField"], options["sortDirection"] = options.delete(:sort) if options[:sort]
+      options['fields[]'] = options.delete(:fields) if options[:fields]
+      options['view'] = options.delete(:view) if options[:view]
       request = build_get_request(worksheet_url, query: options)
       response = perform_request(request)
       result = parse_response(response)
@@ -43,6 +45,9 @@ module Airtable
         raise_bad_formula_error unless options[:formula].is_a? String
         options['filterByFormula'] = options.delete(:formula)
       end
+
+      options['fields[]'] = options.delete(:fields) if options[:fields]
+      options['view'] = options.delete(:view) if options[:view]
 
       request = build_get_request(worksheet_url, query: options)
       response = perform_request(request)

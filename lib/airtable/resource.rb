@@ -177,7 +177,13 @@ module Airtable
     end
 
     def encode_query(params)
-      params.map { |key, value| "#{URI.encode_www_form_component(key.to_s)}=#{URI.encode_www_form_component(value.to_s)}" }.join('&')
+      params.flat_map do |key, value|
+        if value.is_a?(Array)
+          value.map { |v| "#{URI.encode_www_form_component(key.to_s)}=#{URI.encode_www_form_component(v.to_s)}" }
+        else
+          "#{URI.encode_www_form_component(key.to_s)}=#{URI.encode_www_form_component(value.to_s)}"
+        end
+      end.join('&')
     end
   end
 end
