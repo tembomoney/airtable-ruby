@@ -116,9 +116,18 @@ module Airtable
     protected
 
     def check_and_raise_error(response, status_code: nil)
-      return false unless response.is_a?(Hash) && response['error']
+      if response.is_a?(Hash) && response['error']
+        error_hash = response['error']
+        # Preserve Airtable's specific type if present, otherwise classify by status code
+        error_hash['type'] ||= Error::STATUS_CODE_ERROR_TYPES.fetch(status_code, 'UNKNOWN_ERROR')
+        raise Error.new(error_hash, status_code: status_code)
+      end
 
-      raise Error.new(response['error'], status_code: status_code)
+      # Raise on non-2xx status codes even when the parsed result has no error hash.
+      # Covers edge cases where JSON parses successfully but the status indicates failure.
+      if status_code && status_code >= 400
+        raise Error.from_response(status_code, response.to_json)
+      end
     end
 
     def log_response(response, http_method, parsed_result: nil)
@@ -170,10 +179,7 @@ module Airtable
 
       JSON.parse(body)
     rescue JSON::ParserError
-      raise Error.new(
-        { 'type' => 'INVALID_RESPONSE', 'message' => "Unexpected response body: #{body[0..200]}" },
-        status_code: response.code.to_i
-      )
+      raise Error.from_response(response.code.to_i, body)
     end
 
     def result_attributes(res)
