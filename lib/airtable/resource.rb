@@ -6,7 +6,7 @@ module Airtable
   class Resource
     BASE_URI = 'https://api.airtable.com'
     BASE_PATH = '/v0'
-    DEFAULT_TIMEOUT = 30
+    DEFAULT_TIMEOUT = 52
 
     attr_reader :api_key, :app_token, :worksheet_name
 
