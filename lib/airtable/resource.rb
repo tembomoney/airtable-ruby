@@ -55,7 +55,31 @@ module Airtable
       @connection = nil
     end
 
+    MAX_API_RETRIES = 3
+    RETRYABLE_STATUSES = [429, 503].freeze
+
     def perform_request(request)
+      api_attempts = 0
+
+      loop do
+        Airtable::RateLimiter.instance.wait!(app_token)
+
+        response = perform_request_with_connection_retry(request)
+        api_attempts += 1
+        status = response.code.to_i
+
+        if RETRYABLE_STATUSES.include?(status) && api_attempts < MAX_API_RETRIES
+          delay = backoff_delay(api_attempts)
+          log_api_retry(request, status, api_attempts, delay)
+          sleep_for_retry(delay)
+          next
+        end
+
+        return response
+      end
+    end
+
+    def perform_request_with_connection_retry(request)
       retries = 0
       begin
         start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -73,6 +97,25 @@ module Airtable
           retry
         end
         raise e
+      end
+    end
+
+    def sleep_for_retry(delay)
+      Kernel.sleep(delay)
+    end
+
+    def backoff_delay(attempt)
+      base = 2**(attempt - 1)   # attempt 1 => 1s, attempt 2 => 2s
+      base + (rand * base)      # full jitter: [base, 2*base)
+    end
+
+    def log_api_retry(request, status, attempt, delay)
+      message = "[Airtable] HTTP #{status} on #{request.method} #{worksheet_name}, " \
+                "retry #{attempt}/#{MAX_API_RETRIES - 1} in #{'%.2f' % delay}s"
+      if defined?(Rails)
+        Rails.logger.warn(message)
+      else
+        $stderr.puts(message)
       end
     end
 
@@ -134,7 +177,13 @@ module Airtable
     end
 
     def encode_query(params)
-      params.map { |key, value| "#{URI.encode_www_form_component(key.to_s)}=#{URI.encode_www_form_component(value.to_s)}" }.join('&')
+      params.flat_map do |key, value|
+        if value.is_a?(Array)
+          value.map { |v| "#{URI.encode_www_form_component(key.to_s)}=#{URI.encode_www_form_component(v.to_s)}" }
+        else
+          "#{URI.encode_www_form_component(key.to_s)}=#{URI.encode_www_form_component(value.to_s)}"
+        end
+      end.join('&')
     end
   end
 end

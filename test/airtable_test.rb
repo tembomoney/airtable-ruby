@@ -163,7 +163,7 @@ describe Airtable do
       assert_equal "INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND", error.type
     end
 
-    it "should raise an error for non-JSON response bodies" do
+    it "should raise a classified error for non-JSON response bodies" do
       stub_request(:post, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}")
         .to_return(
           body: '<html>502 Bad Gateway</html>',
@@ -175,8 +175,9 @@ describe Airtable do
       error = assert_raises Airtable::Error do
         table.create(record)
       end
-      assert_equal "INVALID_RESPONSE", error.type
+      assert_equal "UNKNOWN_ERROR", error.type
       assert_equal 502, error.status_code
+      assert_includes error.message, "502 Bad Gateway"
     end
 
     it "should return nil for empty response bodies on find" do
@@ -478,6 +479,386 @@ describe Airtable do
       table = Airtable::Client.new(@client_key).table(@app_key, sheet_name)
       record = table.find("rec123")
       assert_equal "rec123", record["id"]
+    end
+  end
+
+  describe "error classification by HTTP status code" do
+    it "should classify 401 as AUTHENTICATION_REQUIRED" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return(body: '{"error":{"message":"Unauthorized"}}', status: 401, headers: { 'Content-Type' => 'application/json' })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      error = assert_raises(Airtable::Error) { table.find("rec123") }
+      assert_equal 'AUTHENTICATION_REQUIRED', error.type
+      assert_equal 401, error.status_code
+    end
+
+    it "should classify 403 as NOT_AUTHORIZED when no type in body" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return(body: '{"error":{"message":"Forbidden"}}', status: 403, headers: { 'Content-Type' => 'application/json' })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      error = assert_raises(Airtable::Error) { table.find("rec123") }
+      assert_equal 'NOT_AUTHORIZED', error.type
+      assert_equal 403, error.status_code
+    end
+
+    it "should classify 404 as NOT_FOUND" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return(body: '{"error":{"message":"Not found"}}', status: 404, headers: { 'Content-Type' => 'application/json' })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      error = assert_raises(Airtable::Error) { table.find("rec123") }
+      assert_equal 'NOT_FOUND', error.type
+      assert_equal 404, error.status_code
+    end
+
+    it "should classify 422 as INVALID_REQUEST" do
+      stub_request(:post, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}")
+        .to_return(body: '{"error":{"message":"Invalid request"}}', status: 422, headers: { 'Content-Type' => 'application/json' })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      record = Airtable::Record.new(name: "Test")
+      error = assert_raises(Airtable::Error) { table.create(record) }
+      assert_equal 'INVALID_REQUEST', error.type
+      assert_equal 422, error.status_code
+    end
+
+    it "should classify 429 as TOO_MANY_REQUESTS" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return(body: '{"error":{"message":"Rate limited"}}', status: 429, headers: { 'Content-Type' => 'application/json' })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      error = assert_raises(Airtable::Error) { table.find("rec123") }
+      assert_equal 'TOO_MANY_REQUESTS', error.type
+      assert_equal 429, error.status_code
+    end
+
+    it "should classify 500 as SERVER_ERROR" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return(body: '{"error":{"message":"Internal server error"}}', status: 500, headers: { 'Content-Type' => 'application/json' })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      error = assert_raises(Airtable::Error) { table.find("rec123") }
+      assert_equal 'SERVER_ERROR', error.type
+      assert_equal 500, error.status_code
+    end
+
+    it "should classify 503 as SERVICE_UNAVAILABLE" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return(body: '<html>503 Service Unavailable</html>', status: 503, headers: { 'Content-Type' => 'text/html' })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      error = assert_raises(Airtable::Error) { table.find("rec123") }
+      assert_equal 'SERVICE_UNAVAILABLE', error.type
+      assert_equal 503, error.status_code
+    end
+
+    it "should preserve Airtable-specific type from JSON body over status code mapping" do
+      stub_request(:post, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}")
+        .to_return(body: '{"error":{"type":"UNKNOWN_COLUMN_NAME","message":"Could not find fields foo"}}', status: 422, headers: { 'Content-Type' => 'application/json' })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      record = Airtable::Record.new(foo: "bar")
+      error = assert_raises(Airtable::Error) { table.create(record) }
+      assert_equal 'UNKNOWN_COLUMN_NAME', error.type
+      assert_equal "Could not find fields foo", error.message
+    end
+
+    it "should classify HTML 502 as UNKNOWN_ERROR (unmapped status code)" do
+      stub_request(:post, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}")
+        .to_return(body: '<html>502 Bad Gateway</html>', status: 502, headers: { 'Content-Type' => 'text/html' })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      record = Airtable::Record.new(foo: "bar")
+      error = assert_raises(Airtable::Error) { table.create(record) }
+      assert_equal 'UNKNOWN_ERROR', error.type
+      assert_equal 502, error.status_code
+    end
+
+    it "should classify empty body with error status code" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return(body: '', status: 401, headers: {})
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      error = assert_raises(Airtable::Error) { table.find("rec123") }
+      assert_equal 'AUTHENTICATION_REQUIRED', error.type
+      assert_equal 401, error.status_code
+    end
+
+    it "should classify nil body with error status code" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return(body: nil, status: 500, headers: {})
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      error = assert_raises(Airtable::Error) { table.find("rec123") }
+      assert_equal 'SERVER_ERROR', error.type
+      assert_equal 500, error.status_code
+    end
+
+    it "should classify unknown status code as UNKNOWN_ERROR" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return(body: 'I am a teapot', status: 418, headers: {})
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      error = assert_raises(Airtable::Error) { table.find("rec123") }
+      assert_equal 'UNKNOWN_ERROR', error.type
+      assert_equal 418, error.status_code
+    end
+
+    it "should raise on JSON without error hash but with error status code" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return(body: '{"ok":false}', status: 500, headers: { 'Content-Type' => 'application/json' })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      error = assert_raises(Airtable::Error) { table.find("rec123") }
+      assert_equal 'SERVER_ERROR', error.type
+      assert_equal 500, error.status_code
+    end
+
+    it "should truncate long HTML bodies in error messages" do
+      long_html = '<html>' + ('x' * 500) + '</html>'
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return(body: long_html, status: 503, headers: { 'Content-Type' => 'text/html' })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      error = assert_raises(Airtable::Error) { table.find("rec123") }
+      assert error.message.length <= 250, "Error message should be truncated, got #{error.message.length} chars"
+    end
+
+    it "should handle string error value instead of hash" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return(body: '{"error":"Something went wrong"}', status: 422, headers: { 'Content-Type' => 'application/json' })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      error = assert_raises(Airtable::Error) { table.find("rec123") }
+      assert_equal 'INVALID_REQUEST', error.type
+      assert_equal 422, error.status_code
+    end
+
+    it "should handle array error value instead of hash" do
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return(body: '{"error":["bad","request"]}', status: 400, headers: { 'Content-Type' => 'application/json' })
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      error = assert_raises(Airtable::Error) { table.find("rec123") }
+      assert_equal 'UNKNOWN_ERROR', error.type
+      assert_equal 400, error.status_code
+    end
+  end
+
+  describe "Error.from_response" do
+    it "should build error from status code and HTML body" do
+      error = Airtable::Error.from_response(503, '<html>outage</html>')
+      assert_equal 'SERVICE_UNAVAILABLE', error.type
+      assert_equal 503, error.status_code
+      assert_includes error.message, 'outage'
+    end
+
+    it "should build error from status code and nil body" do
+      error = Airtable::Error.from_response(401, nil)
+      assert_equal 'AUTHENTICATION_REQUIRED', error.type
+      assert_equal 401, error.status_code
+    end
+
+    it "should build error from status code and empty body" do
+      error = Airtable::Error.from_response(401, '')
+      assert_equal 'AUTHENTICATION_REQUIRED', error.type
+      assert_equal 401, error.status_code
+    end
+
+    it "should preserve JSON body type over status code mapping" do
+      error = Airtable::Error.from_response(422, '{"error":{"type":"CUSTOM_TYPE","message":"custom msg"}}')
+      assert_equal 'CUSTOM_TYPE', error.type
+      assert_equal 'custom msg', error.message
+    end
+
+    it "should fall back to UNKNOWN_ERROR for unmapped status codes" do
+      error = Airtable::Error.from_response(999, 'garbage')
+      assert_equal 'UNKNOWN_ERROR', error.type
+      assert_equal 999, error.status_code
+    end
+  end
+
+  describe "auto-retry on 429/503" do
+    before do
+      # Use a permissive rate limiter so it doesn't interfere with retry tests
+      Airtable::RateLimiter.instance = Airtable::RateLimiter.new(max_requests: 1000, window_seconds: 1.0)
+    end
+
+    after do
+      Airtable::RateLimiter.reset!
+    end
+
+    it "should retry on 429 and succeed on second attempt" do
+      call_count = 0
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return do |_request|
+          call_count += 1
+          if call_count == 1
+            { body: '{"error":{"message":"Rate limited"}}', status: 429, headers: { 'Content-Type' => 'application/json' } }
+          else
+            { body: { "fields" => { "name" => "Test" }, "id" => "rec123" }.to_json, status: 200, headers: { 'Content-Type' => 'application/json' } }
+          end
+        end
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      slept = []
+      table.define_singleton_method(:sleep_for_retry) { |t| slept << t }
+
+      record = table.find("rec123")
+
+      assert_equal "rec123", record["id"]
+      assert_equal 2, call_count
+      assert_equal 1, slept.length
+    end
+
+    it "should retry on 503 and succeed on second attempt" do
+      call_count = 0
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return do |_request|
+          call_count += 1
+          if call_count == 1
+            { body: '<html>503 Service Unavailable</html>', status: 503, headers: { 'Content-Type' => 'text/html' } }
+          else
+            { body: { "fields" => { "name" => "Test" }, "id" => "rec123" }.to_json, status: 200, headers: { 'Content-Type' => 'application/json' } }
+          end
+        end
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      table.define_singleton_method(:sleep_for_retry) { |_t| }
+
+      record = table.find("rec123")
+
+      assert_equal "rec123", record["id"]
+      assert_equal 2, call_count
+    end
+
+    it "should retry POST requests with body intact" do
+      call_count = 0
+      bodies = []
+      stub_request(:post, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}")
+        .to_return do |request|
+          call_count += 1
+          bodies << request.body
+          if call_count == 1
+            { body: '{"error":{"message":"Rate limited"}}', status: 429, headers: { 'Content-Type' => 'application/json' } }
+          else
+            { body: { "fields" => { "name" => "Sarah" }, "id" => "rec1" }.to_json, status: 200, headers: { 'Content-Type' => 'application/json' } }
+          end
+        end
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      table.define_singleton_method(:sleep_for_retry) { |_t| }
+      record = Airtable::Record.new(name: "Sarah")
+      table.create(record)
+
+      assert_equal 2, call_count
+      assert_equal bodies[0], bodies[1], "Request body should be identical on retry"
+      assert_equal "rec1", record["id"]
+    end
+
+    it "should NOT retry on 403" do
+      call_count = 0
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return do |_request|
+          call_count += 1
+          { body: '{"error":{"type":"INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND","message":"Invalid permissions"}}', status: 403, headers: { 'Content-Type' => 'application/json' } }
+        end
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      assert_raises(Airtable::Error) { table.find("rec123") }
+      assert_equal 1, call_count, "403 should not trigger retry"
+    end
+
+    it "should NOT retry on 422" do
+      call_count = 0
+      stub_request(:post, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}")
+        .to_return do |_request|
+          call_count += 1
+          { body: '{"error":{"type":"INVALID_REQUEST","message":"Bad data"}}', status: 422, headers: { 'Content-Type' => 'application/json' } }
+        end
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      record = Airtable::Record.new(foo: "bar")
+      assert_raises(Airtable::Error) { table.create(record) }
+      assert_equal 1, call_count, "422 should not trigger retry"
+    end
+
+    it "should give up after max retries" do
+      call_count = 0
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return do |_request|
+          call_count += 1
+          { body: '{"error":{"message":"Rate limited"}}', status: 429, headers: { 'Content-Type' => 'application/json' } }
+        end
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      slept = []
+      table.define_singleton_method(:sleep_for_retry) { |t| slept << t }
+
+      error = assert_raises(Airtable::Error) { table.find("rec123") }
+
+      assert_equal 'TOO_MANY_REQUESTS', error.type
+      assert_equal 429, error.status_code
+      assert_equal 3, call_count, "Should make exactly #{Airtable::Resource::MAX_API_RETRIES} attempts"
+      assert_equal 2, slept.length, "Should sleep between retries (not after final attempt)"
+    end
+
+    it "should log retry attempts" do
+      call_count = 0
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return do |_request|
+          call_count += 1
+          if call_count == 1
+            { body: '{"error":{"message":"Rate limited"}}', status: 429, headers: { 'Content-Type' => 'application/json' } }
+          else
+            { body: { "fields" => { "name" => "Test" }, "id" => "rec123" }.to_json, status: 200, headers: { 'Content-Type' => 'application/json' } }
+          end
+        end
+
+      stderr_output = StringIO.new
+      original_stderr = $stderr
+      $stderr = stderr_output
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      table.define_singleton_method(:sleep_for_retry) { |_t| }
+      table.find("rec123")
+
+      $stderr = original_stderr
+
+      assert_includes stderr_output.string, 'HTTP 429'
+      assert_includes stderr_output.string, 'retry 1/2'
+    end
+
+    it "should use exponential backoff with jitter" do
+      call_count = 0
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return do |_request|
+          call_count += 1
+          { body: '{"error":{"message":"Rate limited"}}', status: 429, headers: { 'Content-Type' => 'application/json' } }
+        end
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      slept = []
+      table.define_singleton_method(:sleep_for_retry) { |t| slept << t }
+
+      assert_raises(Airtable::Error) { table.find("rec123") }
+
+      # First retry: backoff base=1, jitter=[0,1) → total [1,2)
+      assert slept[0] >= 1.0 && slept[0] < 2.0, "First backoff should be [1,2), got #{slept[0]}"
+      # Second retry: backoff base=2, jitter=[0,2) → total [2,4)
+      assert slept[1] >= 2.0 && slept[1] < 4.0, "Second backoff should be [2,4), got #{slept[1]}"
+    end
+
+    it "should call rate limiter before each retry" do
+      wait_count = 0
+      original_wait = Airtable::RateLimiter.instance.method(:wait!)
+      Airtable::RateLimiter.instance.define_singleton_method(:wait!) do |base_id|
+        wait_count += 1
+        original_wait.call(base_id)
+      end
+
+      call_count = 0
+      stub_request(:get, "https://api.airtable.com/v0/#{@app_key}/#{@sheet_name}/rec123")
+        .to_return do |_request|
+          call_count += 1
+          if call_count == 1
+            { body: '{"error":{"message":"Rate limited"}}', status: 429, headers: { 'Content-Type' => 'application/json' } }
+          else
+            { body: { "fields" => { "name" => "Test" }, "id" => "rec123" }.to_json, status: 200, headers: { 'Content-Type' => 'application/json' } }
+          end
+        end
+
+      table = Airtable::Client.new(@client_key).table(@app_key, @sheet_name)
+      table.define_singleton_method(:sleep_for_retry) { |_t| }
+      table.find("rec123")
+
+      assert_equal 2, wait_count, "Rate limiter should be called before each attempt (initial + retry)"
     end
   end
 end
